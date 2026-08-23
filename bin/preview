@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_path=$(readlink -f -- "$0")
+script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
 project_root=$(dirname -- "$script_dir")
 export PYTHONPATH="$project_root/src${PYTHONPATH:+:$PYTHONPATH}"
 exec python3 -m preview_tool "$@"
