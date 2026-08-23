@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+project_root=$(dirname -- "$script_dir")
+export PYTHONPATH="$project_root/src${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m preview_tool "$@"
