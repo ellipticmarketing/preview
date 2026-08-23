@@ -17,6 +17,7 @@ preview = "preview_tool.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
+script-files = ["bin/stage.ps1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

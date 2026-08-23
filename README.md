@@ -4,7 +4,7 @@
 
 On a personal computer, one URL points to the last project used with `preview`. On a tagged Tailscale server, each project uses its own Tailscale Service URL.
 
-The same command runs on Windows and Ubuntu. Windows uses Laragon and the global `stage` command. Ubuntu sends Tailscale traffic to the local URL in `APP_URL`.
+The same command runs on Windows and Ubuntu. Windows uses Laragon and the included `stage` command. Ubuntu sends Tailscale traffic to the local URL in `APP_URL`.
 
 ## What it does
 
@@ -24,7 +24,7 @@ The command does not use Tailscale Funnel. The preview is not public.
 - GitHub CLI for cloning this private repository
 - A Git project with `APP_URL` in `.env` or `.env.example`
 
-Windows also needs Laragon and the global `stage` PowerShell command.
+Windows also needs Laragon. The Windows installer installs the `stage` PowerShell command with `preview`.
 
 ## Install on Windows
 
@@ -35,7 +35,6 @@ python --version
 git --version
 tailscale version
 gh --version
-Get-Command stage
 ```
 
 Sign in to GitHub if needed:
@@ -59,19 +58,21 @@ Install the command:
 .\install-windows.ps1
 ```
 
-The installer creates this command link:
+The installer creates these command links:
 
 ```powershell
 C:\Rolando Apps\scripts\preview.ps1
+C:\Rolando Apps\scripts\stage.ps1
 ```
 
-Add `C:\Rolando Apps\scripts` to `PATH`, or call the file from your PowerShell profile. The installer saves a dated backup if another launcher exists. If Windows blocks symbolic links, the installer creates a forwarding script.
+Add `C:\Rolando Apps\scripts` to `PATH`, or call the files from your PowerShell profile. The installer saves a dated backup if another launcher exists. If Windows blocks symbolic links, the installer creates a forwarding script.
 
 Check the installation:
 
 ```powershell
 preview version
 preview status
+Get-Command stage
 ```
 
 The default Laragon directory is `F:\laragon`. Set another location before you run `preview`:
@@ -167,7 +168,9 @@ python -m pip install --user .
 
 Make sure the Python user scripts directory is in `PATH`.
 
-You can also run either launcher directly from the cloned repository. The launchers add the local `src` directory to Python's import path.
+On Windows, the Python package also installs `stage.ps1` in that scripts directory.
+
+You can also run the launchers directly from the cloned repository. The `preview` launchers add the local `src` directory to Python's import path.
 
 ## Start a preview
 
