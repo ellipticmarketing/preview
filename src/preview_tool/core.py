@@ -99,7 +99,7 @@ def detect_project(
     if site:
         raw_host = site.strip()
         site_host = raw_host if "." in raw_host else f"{raw_host}.test"
-    elif app_url:
+    elif app_url and (urlparse(app_url).hostname or "").endswith(".test"):
         site_host = urlparse(app_url).hostname or ""
     else:
         site_host = f"{root.name}.test"

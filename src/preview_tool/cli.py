@@ -152,6 +152,11 @@ def update_preview() -> None:
             f"The previous commit was {previous}. The current commit is {current}."
         )
 
+    if os.name != "nt":
+        installer = root / "install-ubuntu.sh"
+        if installer.is_file():
+            run(["sh", str(installer)], cwd=root, capture=False)
+
     state = state_directory()
     state.mkdir(parents=True, exist_ok=True)
     (state / "previous-version").write_text(f"{previous}\n", encoding="utf-8")
@@ -197,12 +202,16 @@ def build_parser() -> argparse.ArgumentParser:
     legacy.add_argument("--status", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--site", help="Override the site host or local site name.")
     parser.add_argument("--backend", help="Override the local HTTP backend URL.")
-    parser.add_argument("--no-stage", action="store_true", help="Skip Laragon staging on Windows.")
+    parser.add_argument(
+        "--no-stage",
+        action="store_true",
+        help="Skip Laragon or Nginx staging and use APP_URL directly.",
+    )
     parser.add_argument(
         "--laragon-root",
         type=Path,
-        default=Path(os.environ.get("LARAGON_ROOT", r"F:\laragon")),
-        help="Laragon directory on Windows. The default is F:\\laragon.",
+        default=Path(os.environ["LARAGON_ROOT"]) if "LARAGON_ROOT" in os.environ else None,
+        help="Override the detected Laragon directory on Windows.",
     )
     return parser
 

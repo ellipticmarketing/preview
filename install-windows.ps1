@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [string] $Destination = 'C:\Rolando Apps\scripts\preview.ps1',
-    [string] $StageDestination = 'C:\Rolando Apps\scripts\stage.ps1'
+    [string] $Destination = (Join-Path $env:LOCALAPPDATA 'Elliptic\bin\preview.ps1'),
+    [string] $StageDestination = (Join-Path $env:LOCALAPPDATA 'Elliptic\bin\stage.ps1')
 )
 
 $ErrorActionPreference = 'Stop'

@@ -4,12 +4,13 @@
 
 On a personal computer, one URL points to the last project used with `preview`. On a tagged Tailscale server, each project uses its own Tailscale Service URL.
 
-The same command runs on Windows and Ubuntu. Windows uses Laragon and the included `stage` command. Ubuntu sends Tailscale traffic to the local URL in `APP_URL`.
+The same command runs on Windows and Ubuntu. Windows stages the current worktree with Laragon. Ubuntu stages it with Nginx.
 
 ## What it does
 
 - Finds the current Git project.
 - Reads `APP_URL` from `.env` or `.env.example`.
+- Points a stable local web-server path at the current worktree.
 - Starts a private Tailscale HTTPS proxy.
 - Keeps one active URL on a personal computer.
 - Uses one URL per project on a tagged Tailscale server.
@@ -21,53 +22,27 @@ The command does not use Tailscale Funnel. The preview is not public.
 - Python 3.10 or newer
 - Git 2.30 or newer
 - Tailscale 1.86 or newer
-- GitHub CLI for cloning this private repository
+- `curl` on Ubuntu
 - A Git project with `APP_URL` in `.env` or `.env.example`
 
 Windows also needs Laragon. The Windows installer installs the `stage` PowerShell command with `preview`.
 
 ## Install on Windows
 
-Open PowerShell. Check the required commands:
+Open PowerShell and paste this command:
 
 ```powershell
-python --version
-git --version
-tailscale version
-gh --version
+irm https://raw.githubusercontent.com/ellipticmarketing/preview/main/install.ps1 | iex
 ```
 
-Sign in to GitHub if needed:
+The installer uses Windows Package Manager to install Git, Python, Tailscale, and Laragon if they are missing. It installs `preview` and `stage` in `%LOCALAPPDATA%\Elliptic\bin`.
 
-```powershell
-gh auth login
-```
+When the installer finishes:
 
-Clone the repository:
-
-```powershell
-New-Item -ItemType Directory -Path 'D:\Projects\Elliptic' -Force | Out-Null
-Set-Location 'D:\Projects\Elliptic'
-gh repo clone ellipticmarketing/stage
-Set-Location stage
-```
-
-Install the command:
-
-```powershell
-.\install-windows.ps1
-```
-
-The installer creates these command links:
-
-```powershell
-C:\Rolando Apps\scripts\preview.ps1
-C:\Rolando Apps\scripts\stage.ps1
-```
-
-Add `C:\Rolando Apps\scripts` to `PATH`, or call the files from your PowerShell profile. The installer saves a dated backup if another launcher exists. If Windows blocks symbolic links, the installer creates a forwarding script.
-
-Check the installation:
+1. Open Tailscale from the Start menu and sign in.
+2. Start Laragon.
+3. Open a new PowerShell window.
+4. Check the installation:
 
 ```powershell
 preview version
@@ -75,7 +50,26 @@ preview status
 Get-Command stage
 ```
 
-The default Laragon directory is `F:\laragon`. Set another location before you run `preview`:
+The installer clones this repository into `%LOCALAPPDATA%\Elliptic\preview`. Run the same command again to update it. The installer stops if its clone has local changes.
+
+To install from a clone instead:
+
+```powershell
+git clone https://github.com/ellipticmarketing/preview.git
+Set-Location preview
+.\install-windows.ps1
+```
+
+The installer creates these command links:
+
+```powershell
+%LOCALAPPDATA%\Elliptic\bin\preview.ps1
+%LOCALAPPDATA%\Elliptic\bin\stage.ps1
+```
+
+The bootstrap adds this directory to your user `PATH`. The clone installer only creates the command links, so add the directory to `PATH` when you use the manual method. Both installers save a dated backup if another launcher exists. If Windows blocks symbolic links, they create forwarding scripts.
+
+`preview` detects the running Laragon installation. To use another location, set it before you run `preview`:
 
 ```powershell
 $env:LARAGON_ROOT = 'C:\laragon'
@@ -84,59 +78,86 @@ preview
 
 ## Install on Ubuntu
 
-Install the required packages:
+Open a terminal and paste this command:
 
 ```sh
-sudo apt update
-sudo apt install -y git python3 gh
+curl -fsSL https://raw.githubusercontent.com/ellipticmarketing/preview/main/install.sh | bash
 ```
 
-Install Tailscale and sign in before you continue. Check the commands:
+The installer asks for your password if it must install Git, Python, or Tailscale. It puts `preview` and `stage` in `$HOME/.local/bin`.
+
+When the installer finishes, connect the machine to Tailscale:
 
 ```sh
-python3 --version
-git --version
-tailscale version
-gh --version
-tailscale status
+sudo tailscale up
 ```
 
-Sign in to GitHub if needed:
-
-```sh
-gh auth login
-```
-
-Clone and install:
-
-```sh
-mkdir -p "$HOME/.local/share"
-gh repo clone ellipticmarketing/stage "$HOME/.local/share/elliptic-preview"
-cd "$HOME/.local/share/elliptic-preview"
-./install-ubuntu.sh
-```
-
-The installer creates this link:
-
-```sh
-$HOME/.local/bin/preview
-```
-
-Add the command directory to `PATH` if needed:
-
-```sh
-printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$HOME/.profile"
-. "$HOME/.profile"
-```
-
-Check the installation:
+Open the link that Tailscale prints and sign in. Then open a new terminal and check the installation:
 
 ```sh
 preview version
 preview status
 ```
 
-On Ubuntu, the web application must already be running. `preview` does not start PHP, Laravel, Apache, Nginx, or a development server.
+### Start your first preview
+
+Go to your application's Git repository. It must have a `public` directory:
+
+```sh
+cd /path/to/your/application
+```
+
+Check that `.env` contains the local URL of the running application. For example:
+
+```dotenv
+APP_URL=http://my-project.test
+```
+
+Start the private preview:
+
+```sh
+preview
+```
+
+If Nginx is installed, `preview` runs `stage` and points Nginx at the current worktree. If Nginx is missing, it asks whether to install it. Choose no to send Tailscale directly to `APP_URL`.
+
+The command then prints the private HTTPS URL. Only devices allowed by your Tailscale network can open it.
+
+You can switch Nginx to a worktree without starting a Tailscale preview:
+
+```sh
+stage
+```
+
+The command creates a stable link under `/var/lib/elliptic-stage` and an Nginx site under `/etc/nginx/sites-available`. It uses a local port that stays the same for that project. Nginx reloads only when the site configuration changes.
+
+For a PHP project, `stage` uses the newest PHP-FPM socket in `/run/php`. If PHP-FPM is missing, it asks before installation. It reloads PHP-FPM after a worktree switch so cached PHP paths do not point to the old worktree. The Nginx user must have permission to read the worktree and its `public` directory.
+
+### What the installer changes
+
+The installer:
+
+- Clones this repository into `$HOME/.local/share/elliptic-preview`.
+- Creates `$HOME/.local/bin/preview` and `$HOME/.local/bin/stage`.
+- Adds `$HOME/.local/bin` to `PATH` in `$HOME/.profile` if needed.
+- Installs missing base system packages with `apt-get`.
+- Uses the official Tailscale installer when Tailscale is missing.
+
+Run the same command again to update an existing installation. The installer stops if its clone has local changes.
+
+To install from a clone instead:
+
+```sh
+git clone https://github.com/ellipticmarketing/preview.git
+cd preview
+./install-ubuntu.sh
+```
+
+If the shell cannot find `preview` after installation, start a new terminal or run:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
 
 ## Install as a Python package
 
@@ -168,7 +189,7 @@ python -m pip install --user .
 
 Make sure the Python user scripts directory is in `PATH`.
 
-On Windows, the Python package also installs `stage.ps1` in that scripts directory.
+The Python package also installs the platform `stage` launchers in that scripts directory.
 
 You can also run the launchers directly from the cloned repository. The `preview` launchers add the local `src` directory to Python's import path.
 
@@ -203,9 +224,9 @@ preview --site example.test
 
 `preview update` checks for local changes, runs `git pull --ff-only`, and runs the tests. It saves the previous commit ID in the user state directory. `preview rollback` returns the clone to that saved commit. Both commands refuse to run when the clone has local changes.
 
-Use `--backend` when `APP_URL` is not reachable from the same computer.
+Use `--backend` to keep a running application server as the backend. `stage` still updates the Nginx worktree unless you also use `--no-stage`.
 
-Use `--no-stage` to skip Laragon and proxy directly to the backend.
+Use `--no-stage` to skip Laragon or Nginx and proxy directly to `APP_URL` or `--backend`.
 
 ## Tagged Tailscale servers
 

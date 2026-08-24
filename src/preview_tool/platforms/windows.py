@@ -30,6 +30,27 @@ def stage_script(shell: str) -> str:
     return path
 
 
+def running_laragon_root(shell: str) -> Path:
+    result = run(
+        [
+            shell,
+            "-NoProfile",
+            "-Command",
+            "$process = Get-CimInstance Win32_Process | "
+            "Where-Object { $_.Name -ieq 'laragon.exe' -and $_.ExecutablePath } | "
+            "Select-Object -First 1; "
+            "if ($null -ne $process) { Split-Path $process.ExecutablePath }",
+        ],
+        check=False,
+    )
+    path = result.stdout.strip()
+    if not path:
+        raise PreviewError(
+            "Laragon is not running. Start Laragon or use --laragon-root."
+        )
+    return Path(path)
+
+
 def run_stage(project: Project, laragon_root: Path, *, reload: bool = False) -> None:
     shell = powershell_path()
     command = [
@@ -63,7 +84,12 @@ def apache_preview_config(project: Project, public_host: str, laragon_root: Path
 
 
 def prepare(project: Project, public_host: str, args: Namespace) -> Project:
-    laragon_root = args.laragon_root.resolve()
+    shell = powershell_path()
+    laragon_root = (
+        args.laragon_root.resolve()
+        if args.laragon_root is not None
+        else running_laragon_root(shell).resolve()
+    )
     if args.backend is None:
         project = Project(
             project.root,

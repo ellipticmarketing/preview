@@ -7,7 +7,10 @@ from preview_tool.core import Project
 
 
 def prepare(project: Project, public_host: str, args: Namespace) -> Project:
-    if platform.system() == "Windows" and not args.no_stage:
+    if args.no_stage:
+        return project
+
+    if platform.system() == "Windows":
         from .windows import prepare as prepare_windows
 
         return prepare_windows(project, public_host, args)

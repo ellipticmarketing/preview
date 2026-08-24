@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+site=''
+backend_only=false
+no_reload=false
+
+fail() {
+    printf 'stage: %s\n' "$1" >&2
+    exit 1
+}
+
+while (($# > 0)); do
+    case "$1" in
+        --site)
+            (($# >= 2)) || fail '--site needs a value.'
+            site=$2
+            shift 2
+            ;;
+        --backend-only)
+            backend_only=true
+            shift
+            ;;
+        --no-reload)
+            no_reload=true
+            shift
+            ;;
+        *)
+            fail "Unknown option: $1"
+            ;;
+    esac
+done
+
+command -v git >/dev/null 2>&1 || fail 'Git is not installed.'
+command -v python3 >/dev/null 2>&1 || fail 'Python 3 is not installed.'
+if [[ $EUID -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then
+    fail 'sudo is required to configure Nginx.'
+fi
+
+run_as_root() {
+    if [[ $EUID -eq 0 ]]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+skip_stage() {
+    if ! $backend_only; then
+        printf 'Nginx staging skipped.\n'
+    fi
+    exit 20
+}
+
+offer_package_install() {
+    local name=$1
+    local package=$2
+    local answer=''
+
+    if [[ ! -r /dev/tty ]]; then
+        return 1
+    fi
+
+    printf '%s is not installed. Install it for Linux staging? [y/N] ' "$name" > /dev/tty
+    read -r answer < /dev/tty || true
+    [[ $answer =~ ^[Yy]([Ee][Ss])?$ ]] || return 1
+
+    command -v apt-get >/dev/null 2>&1 || fail "$name must be installed manually because apt-get is not available."
+    run_as_root apt-get update
+    run_as_root apt-get install -y "$package"
+}
+
+worktree_root=$(git rev-parse --show-toplevel 2>/dev/null) || fail 'Run stage from a Git worktree.'
+public_path="$worktree_root/public"
+[[ -d $public_path ]] || fail "The current worktree does not have a public directory: $public_path"
+
+if ! command -v nginx >/dev/null 2>&1; then
+    offer_package_install 'Nginx' 'nginx' || skip_stage
+fi
+command -v nginx >/dev/null 2>&1 || fail 'Nginx was installed, but its command was not found.'
+run_as_root systemctl enable --now nginx
+
+if [[ -z $site ]]; then
+    for environment_file in "$worktree_root/.env" "$worktree_root/.env.example"; do
+        [[ -f $environment_file ]] || continue
+        app_url=$(sed -nE 's/^[[:space:]]*APP_URL[[:space:]]*=[[:space:]]*["'"']?([^"'"'[:space:]]+).*/\1/p' "$environment_file" | head -n 1)
+        if [[ -n $app_url ]]; then
+            app_host=$(python3 -c 'import sys; from urllib.parse import urlparse; print(urlparse(sys.argv[1]).hostname or "")' "$app_url")
+            if [[ $app_host == *.test ]]; then
+                site=$app_host
+                break
+            fi
+        fi
+    done
+fi
+
+if [[ -z $site ]]; then
+    common_directory=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || fail 'Git could not find the common repository directory.'
+    site=$(basename "$(dirname "$common_directory")")
+fi
+
+site=${site%.test}
+site=${site,,}
+[[ $site =~ ^[a-z0-9][a-z0-9._-]*$ ]] || fail "The site name is not valid: $site"
+
+port=$(python3 -c 'import sys, zlib; print(20000 + zlib.crc32(sys.argv[1].encode()) % 20000)' "$site")
+backend="http://127.0.0.1:$port"
+stage_directory="/var/lib/elliptic-stage/$site"
+staged_public_path="$stage_directory/public"
+temporary_link="$stage_directory/public.new.$$"
+old_link="$stage_directory/public.old.$$"
+available_directory='/etc/nginx/sites-available'
+enabled_directory='/etc/nginx/sites-enabled'
+configuration="$available_directory/elliptic-stage-$site.conf"
+enabled_configuration="$enabled_directory/elliptic-stage-$site.conf"
+
+php_location=''
+index_names='index.html'
+fallback='=404'
+if [[ -f $public_path/index.php ]]; then
+    php_socket=$(find /run/php -maxdepth 1 -type s -name 'php*-fpm.sock' 2>/dev/null | sort -V | tail -n 1)
+    if [[ -z $php_socket ]]; then
+        offer_package_install 'PHP-FPM' 'php-fpm' || skip_stage
+        while read -r php_service _; do
+            [[ -n $php_service ]] || continue
+            run_as_root systemctl enable --now "$php_service"
+        done < <(systemctl list-unit-files --type=service --no-legend 'php*-fpm.service')
+        php_socket=$(find /run/php -maxdepth 1 -type s -name 'php*-fpm.sock' 2>/dev/null | sort -V | tail -n 1)
+    fi
+    [[ -n $php_socket ]] || fail 'PHP-FPM was installed, but no socket was found under /run/php.'
+    index_names='index.php index.html'
+    fallback='/index.php?$query_string'
+    php_location=$(cat <<EOF
+
+    location ~ \.php$ {
+        try_files \$uri =404;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param HTTPS on;
+        fastcgi_pass unix:$php_socket;
+    }
+EOF
+)
+fi
+
+temporary_configuration=$(mktemp)
+trap 'rm -f "$temporary_configuration"' EXIT
+cat > "$temporary_configuration" <<EOF
+server {
+    listen 127.0.0.1:$port;
+    server_name $site.test;
+    root $staged_public_path;
+    index $index_names;
+
+    location / {
+        try_files \$uri \$uri/ $fallback;
+    }
+$php_location
+
+    location ~ /\. {
+        deny all;
+    }
+}
+EOF
+
+run_as_root mkdir -p "$stage_directory" "$available_directory" "$enabled_directory"
+
+nginx_user=$(run_as_root sed -nE 's/^[[:space:]]*user[[:space:]]+([^;[:space:]]+).*/\1/p' /etc/nginx/nginx.conf | head -n 1)
+nginx_user=${nginx_user:-www-data}
+permission_probe=$public_path
+[[ -f $public_path/index.php ]] && permission_probe=$public_path/index.php
+if [[ $EUID -eq 0 ]]; then
+    runuser -u "$nginx_user" -- test -r "$permission_probe" ||
+        fail "Nginx user $nginx_user cannot read the worktree. Fix directory permissions for $worktree_root."
+else
+    sudo -u "$nginx_user" test -r "$permission_probe" ||
+        fail "Nginx user $nginx_user cannot read the worktree. Fix directory permissions for $worktree_root."
+fi
+
+run_as_root rm -f "$temporary_link" "$old_link"
+run_as_root ln -s "$public_path" "$temporary_link"
+
+if run_as_root test -e "$staged_public_path" || run_as_root test -L "$staged_public_path"; then
+    run_as_root test -L "$staged_public_path" || fail "The staging path exists but is not a symbolic link: $staged_public_path"
+    run_as_root mv "$staged_public_path" "$old_link"
+fi
+
+if ! run_as_root mv "$temporary_link" "$staged_public_path"; then
+    if run_as_root test -L "$old_link"; then
+        run_as_root mv "$old_link" "$staged_public_path"
+    fi
+    fail 'The staged public link could not be changed.'
+fi
+run_as_root rm -f "$old_link"
+
+configuration_changed=true
+if run_as_root test -f "$configuration" && run_as_root cmp -s "$temporary_configuration" "$configuration"; then
+    configuration_changed=false
+fi
+
+if $configuration_changed; then
+    backup=''
+    if run_as_root test -f "$configuration"; then
+        backup="$configuration.bak"
+        run_as_root cp "$configuration" "$backup"
+    fi
+
+    run_as_root install -m 0644 "$temporary_configuration" "$configuration"
+    run_as_root ln -sfn "$configuration" "$enabled_configuration"
+
+    if ! run_as_root nginx -t; then
+        if [[ -n $backup ]]; then
+            run_as_root mv "$backup" "$configuration"
+        else
+            run_as_root rm -f "$configuration" "$enabled_configuration"
+        fi
+        fail 'The generated Nginx configuration did not pass nginx -t.'
+    fi
+
+    if ! $no_reload; then
+        run_as_root systemctl reload nginx
+    fi
+fi
+
+if [[ -n ${php_socket:-} ]] && ! $no_reload; then
+    php_service=$(basename "$php_socket" .sock)
+    run_as_root systemctl reload "$php_service"
+fi
+
+if $backend_only; then
+    printf '%s\n' "$backend"
+else
+    printf 'Staged %s.test successfully.\n' "$site"
+    printf 'Backend: %s\n' "$backend"
+fi

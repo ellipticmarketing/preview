@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "elliptic-preview"
-version = "0.2.0"
+version = "0.3.0"
 description = "Point one private Tailscale URL at the current Git project."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,7 +17,7 @@ preview = "preview_tool.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-script-files = ["bin/stage.ps1"]
+script-files = ["bin/stage", "bin/stage.ps1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
