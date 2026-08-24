@@ -100,7 +100,7 @@ class PreviewTests(unittest.TestCase):
                 patch("preview_tool.platforms.linux.shutil.which", return_value=None),
                 patch("preview_tool.platforms.linux.sys.argv", [str(preview)]),
             ):
-                self.assertEqual(stage_path(), str(stage))
+                self.assertEqual(Path(stage_path()).resolve(), stage.resolve())
 
     def test_linux_stage_keeps_explicit_backend(self) -> None:
         project = Project(Path("/project"), "demo.test", "demo", "http://127.0.0.1:8000")
