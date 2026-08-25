@@ -1,3 +1,3 @@
-"""Private project previews through Tailscale."""
+"""Stable local addresses for project previews."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

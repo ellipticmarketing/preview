@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import sys
 from pathlib import Path
@@ -190,7 +191,7 @@ def rollback_preview() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="preview",
-        description="Share the current Git project through private Tailscale HTTPS.",
+        description="Share the current Git project on the local network or Tailscale.",
     )
     parser.add_argument(
         "command",
@@ -205,7 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-stage",
         action="store_true",
-        help="Skip Laragon or Nginx staging and use APP_URL directly.",
+        help="Skip Laragon staging on Windows. Linux mDNS previews require staging.",
     )
     parser.add_argument(
         "--laragon-root",
@@ -262,6 +263,26 @@ def start_preview(tailscale: str, args: argparse.Namespace) -> None:
     print("Only devices allowed by this Tailscale network can open it.")
 
 
+def start_linux_preview(args: argparse.Namespace) -> None:
+    from preview_tool.platforms.linux import status
+
+    project = detect_project(Path.cwd(), site=args.site, backend=args.backend)
+    args.multi_url = True
+    project = prepare(project, "", args)
+    print(f"Published {project.backend_url}")
+    print("Devices on the same local network can open it.")
+    print("\nLocal preview addresses:")
+    status()
+
+
+def stop_linux_preview(args: argparse.Namespace) -> None:
+    from preview_tool.platforms.linux import stop
+
+    project = detect_project(Path.cwd(), site=args.site, backend=args.backend)
+    stop(project)
+    print(f"Stopped the local preview for {project.site_name}.")
+
+
 def execute(args: argparse.Namespace) -> int:
     command = selected_command(args)
     if command == "version":
@@ -272,6 +293,17 @@ def execute(args: argparse.Namespace) -> int:
         return 0
     if command == "rollback":
         rollback_preview()
+        return 0
+
+    if platform.system() == "Linux":
+        if command == "status":
+            from preview_tool.platforms.linux import status
+
+            status()
+        elif command == "stop":
+            stop_linux_preview(args)
+        else:
+            start_linux_preview(args)
         return 0
 
     tailscale = tailscale_path()

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "elliptic-preview"
-version = "0.3.0"
-description = "Point one private Tailscale URL at the current Git project."
+version = "0.4.0"
+description = "Give local Git projects stable preview addresses."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

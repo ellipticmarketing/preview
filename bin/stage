@@ -2,8 +2,13 @@
 set -Eeuo pipefail
 
 site=''
+machine=''
+backend=''
 backend_only=false
 no_reload=false
+stop_site=false
+show_status=false
+quiet=false
 
 fail() {
     printf 'stage: %s\n' "$1" >&2
@@ -17,6 +22,16 @@ while (($# > 0)); do
             site=$2
             shift 2
             ;;
+        --machine)
+            (($# >= 2)) || fail '--machine needs a value.'
+            machine=$2
+            shift 2
+            ;;
+        --backend)
+            (($# >= 2)) || fail '--backend needs a value.'
+            backend=$2
+            shift 2
+            ;;
         --backend-only)
             backend_only=true
             shift
@@ -25,16 +40,42 @@ while (($# > 0)); do
             no_reload=true
             shift
             ;;
+        --stop)
+            stop_site=true
+            shift
+            ;;
+        --status)
+            show_status=true
+            shift
+            ;;
+        --quiet)
+            quiet=true
+            shift
+            ;;
         *)
             fail "Unknown option: $1"
             ;;
     esac
 done
 
+if $show_status; then
+    found=false
+    shopt -s nullglob
+    for configuration in /etc/nginx/sites-available/elliptic-stage-*.conf; do
+        local_host=$(sed -n 's/^# elliptic-preview-host: //p' "$configuration" | head -n 1)
+        local_backend=$(sed -n 's/^# elliptic-preview-backend: //p' "$configuration" | head -n 1)
+        [[ -n $local_host ]] || continue
+        printf 'http://%s -> %s\n' "$local_host" "${local_backend:-staged worktree}"
+        found=true
+    done
+    $found || printf 'No local preview is active.\n'
+    exit 0
+fi
+
 command -v git >/dev/null 2>&1 || fail 'Git is not installed.'
 command -v python3 >/dev/null 2>&1 || fail 'Python 3 is not installed.'
 if [[ $EUID -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then
-    fail 'sudo is required to configure Nginx.'
+    fail 'sudo is required to configure Nginx and Avahi.'
 fi
 
 run_as_root() {
@@ -45,16 +86,9 @@ run_as_root() {
     fi
 }
 
-skip_stage() {
-    if ! $backend_only; then
-        printf 'Nginx staging skipped.\n'
-    fi
-    exit 20
-}
-
 offer_package_install() {
     local name=$1
-    local package=$2
+    shift
     local answer=''
 
     if [[ ! -r /dev/tty ]]; then
@@ -67,18 +101,11 @@ offer_package_install() {
 
     command -v apt-get >/dev/null 2>&1 || fail "$name must be installed manually because apt-get is not available."
     run_as_root apt-get update
-    run_as_root apt-get install -y "$package"
+    run_as_root apt-get install -y "$@"
 }
 
 worktree_root=$(git rev-parse --show-toplevel 2>/dev/null) || fail 'Run stage from a Git worktree.'
 public_path="$worktree_root/public"
-[[ -d $public_path ]] || fail "The current worktree does not have a public directory: $public_path"
-
-if ! command -v nginx >/dev/null 2>&1; then
-    offer_package_install 'Nginx' 'nginx' || skip_stage
-fi
-command -v nginx >/dev/null 2>&1 || fail 'Nginx was installed, but its command was not found.'
-run_as_root systemctl enable --now nginx
 
 if [[ -z $site ]]; then
     for environment_file in "$worktree_root/.env" "$worktree_root/.env.example"; do
@@ -114,24 +141,100 @@ site=${site%.test}
 site=${site,,}
 [[ $site =~ ^[a-z0-9][a-z0-9._-]*$ ]] || fail "The site name is not valid: $site"
 
-port=$(python3 -c 'import sys, zlib; print(20000 + zlib.crc32(sys.argv[1].encode()) % 20000)' "$site")
-backend="http://127.0.0.1:$port"
-stage_directory="/var/lib/elliptic-stage/$site"
-staged_public_path="$stage_directory/public"
-temporary_link="$stage_directory/public.new.$$"
-old_link="$stage_directory/public.old.$$"
+machine=${machine:-$(hostname -s)}
+project_label=$(python3 -c 'import re,sys; value=re.sub(r"[^a-z0-9-]+", "-", sys.argv[1].lower()).strip("-"); print(value)' "$site")
+machine_label=$(python3 -c 'import re,sys; value=re.sub(r"[^a-z0-9-]+", "-", sys.argv[1].split(".", 1)[0].lower()).strip("-"); print(value)' "$machine")
+[[ -n $project_label ]] || fail 'The project did not produce a valid mDNS label.'
+[[ -n $machine_label ]] || fail 'The machine did not produce a valid mDNS label.'
+mdns_host="$project_label-$machine_label.local"
+legacy_mdns_host="$project_label.$machine_label.local"
+
 available_directory='/etc/nginx/sites-available'
 enabled_directory='/etc/nginx/sites-enabled'
 configuration="$available_directory/elliptic-stage-$site.conf"
 enabled_configuration="$enabled_directory/elliptic-stage-$site.conf"
+mdns_service="/etc/systemd/system/elliptic-preview-mdns-$site.service"
+
+remove_mdns_host() {
+    local hosts_file='/etc/avahi/hosts'
+    local temporary_hosts
+    [[ -f $hosts_file ]] || return 0
+    temporary_hosts=$(mktemp)
+    run_as_root awk -v host="$mdns_host" -v legacy="$legacy_mdns_host" '$2 != host && $2 != legacy { print }' "$hosts_file" > "$temporary_hosts"
+    run_as_root install -m 0644 "$temporary_hosts" "$hosts_file"
+    rm -f "$temporary_hosts"
+}
+
+if $stop_site; then
+    run_as_root rm -f "$configuration" "$enabled_configuration"
+    remove_mdns_host
+    run_as_root systemctl disable --now "elliptic-preview-mdns-$site.service" >/dev/null 2>&1 || true
+    run_as_root rm -f "$mdns_service"
+    run_as_root systemctl daemon-reload
+    if command -v nginx >/dev/null 2>&1 && run_as_root nginx -t >/dev/null 2>&1; then
+        run_as_root systemctl reload nginx
+    fi
+    if systemctl list-unit-files avahi-daemon.service >/dev/null 2>&1; then
+        run_as_root systemctl restart avahi-daemon
+    fi
+    printf 'Removed http://%s\n' "$mdns_host"
+    exit 0
+fi
+
+if ! command -v nginx >/dev/null 2>&1; then
+    offer_package_install 'Nginx' nginx || fail 'Nginx is required for mDNS previews.'
+fi
+if ! command -v avahi-daemon >/dev/null 2>&1; then
+    offer_package_install 'Avahi' avahi-daemon avahi-utils libnss-mdns || fail 'Avahi is required for mDNS previews.'
+fi
+command -v nginx >/dev/null 2>&1 || fail 'Nginx was installed, but its command was not found.'
+command -v avahi-daemon >/dev/null 2>&1 || fail 'Avahi was installed, but its command was not found.'
+run_as_root systemctl enable --now nginx >/dev/null 2>&1
+run_as_root systemctl enable --now avahi-daemon >/dev/null 2>&1
+
+if [[ -n $backend ]]; then
+    original_backend=$backend
+    backend=$(python3 -c 'import sys; from urllib.parse import urlparse; value=sys.argv[1].rstrip("/"); parsed=urlparse(value); print(value) if parsed.scheme in {"http", "https"} and parsed.hostname else sys.exit(1)' "$backend") || fail "The backend URL is not valid: $original_backend"
+else
+    [[ -d $public_path ]] || fail "The current worktree does not have a public directory: $public_path"
+fi
+
+lan_interface=$(ip -4 route show table main default 2>/dev/null | awk 'NR == 1 { print $5 }')
+lan_ip=''
+if [[ -n $lan_interface ]]; then
+    lan_ip=$(ip -o -4 address show dev "$lan_interface" scope global 2>/dev/null | awk 'NR == 1 { split($4, address, "/"); print address[1] }')
+fi
+if [[ -z $lan_ip ]]; then
+    lan_ip=$(hostname -I 2>/dev/null | awk '{ for (i=1; i<=NF; i++) if ($i !~ /^127\./ && $i !~ /^100\./) { print $i; exit } }')
+fi
+[[ -n $lan_ip ]] || fail 'A local IPv4 address could not be found for mDNS.'
+
+stage_directory="/var/lib/elliptic-stage/$site"
+staged_public_path="$stage_directory/public"
+temporary_link="$stage_directory/public.new.$$"
+old_link="$stage_directory/public.old.$$"
 
 php_location=''
 index_names='index.html'
 fallback='=404'
-if [[ -f $public_path/index.php ]]; then
+proxy_location=''
+if [[ -n $backend ]]; then
+    proxy_location=$(cat <<EOF
+    location / {
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_pass $backend;
+    }
+EOF
+)
+elif [[ -f $public_path/index.php ]]; then
     php_socket=$(find /run/php -maxdepth 1 -type s -name 'php*-fpm.sock' 2>/dev/null | sort -V | tail -n 1)
     if [[ -z $php_socket ]]; then
-        offer_package_install 'PHP-FPM' 'php-fpm' || skip_stage
+        offer_package_install 'PHP-FPM' php-fpm || fail 'PHP-FPM is required to stage this PHP project.'
         while read -r php_service _; do
             [[ -n $php_service ]] || continue
             run_as_root systemctl enable --now "$php_service"
@@ -147,7 +250,6 @@ if [[ -f $public_path/index.php ]]; then
         try_files \$uri =404;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param HTTPS on;
         fastcgi_pass unix:$php_socket;
     }
 EOF
@@ -156,10 +258,30 @@ fi
 
 temporary_configuration=$(mktemp)
 trap 'rm -f "$temporary_configuration"' EXIT
-cat > "$temporary_configuration" <<EOF
+if [[ -n $backend ]]; then
+    cat > "$temporary_configuration" <<EOF
+# elliptic-preview-host: $mdns_host
+# elliptic-preview-backend: $backend
 server {
-    listen 127.0.0.1:$port;
-    server_name $site.test;
+    listen 80;
+    listen [::]:80;
+    server_name $mdns_host;
+
+$proxy_location
+
+    location ~ /\. {
+        deny all;
+    }
+}
+EOF
+else
+    cat > "$temporary_configuration" <<EOF
+# elliptic-preview-host: $mdns_host
+# elliptic-preview-backend: $staged_public_path
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $mdns_host;
     root $staged_public_path;
     index $index_names;
 
@@ -173,36 +295,37 @@ $php_location
     }
 }
 EOF
-
-run_as_root mkdir -p "$stage_directory" "$available_directory" "$enabled_directory"
-
-nginx_user=$(run_as_root sed -nE 's/^[[:space:]]*user[[:space:]]+([^;[:space:]]+).*/\1/p' /etc/nginx/nginx.conf | head -n 1)
-nginx_user=${nginx_user:-www-data}
-permission_probe=$public_path
-[[ -f $public_path/index.php ]] && permission_probe=$public_path/index.php
-if [[ $EUID -eq 0 ]]; then
-    runuser -u "$nginx_user" -- test -r "$permission_probe" ||
-        fail "Nginx user $nginx_user cannot read the worktree. Fix directory permissions for $worktree_root."
-else
-    sudo -u "$nginx_user" test -r "$permission_probe" ||
-        fail "Nginx user $nginx_user cannot read the worktree. Fix directory permissions for $worktree_root."
 fi
 
-run_as_root rm -f "$temporary_link" "$old_link"
-run_as_root ln -s "$public_path" "$temporary_link"
+run_as_root mkdir -p "$stage_directory" "$available_directory" "$enabled_directory" /etc/avahi
 
-if run_as_root test -e "$staged_public_path" || run_as_root test -L "$staged_public_path"; then
-    run_as_root test -L "$staged_public_path" || fail "The staging path exists but is not a symbolic link: $staged_public_path"
-    run_as_root mv "$staged_public_path" "$old_link"
-fi
-
-if ! run_as_root mv "$temporary_link" "$staged_public_path"; then
-    if run_as_root test -L "$old_link"; then
-        run_as_root mv "$old_link" "$staged_public_path"
+if [[ -z $backend ]]; then
+    nginx_user=$(run_as_root sed -nE 's/^[[:space:]]*user[[:space:]]+([^;[:space:]]+).*/\1/p' /etc/nginx/nginx.conf | head -n 1)
+    nginx_user=${nginx_user:-www-data}
+    permission_probe=$public_path
+    [[ -f $public_path/index.php ]] && permission_probe=$public_path/index.php
+    if [[ $EUID -eq 0 ]]; then
+        runuser -u "$nginx_user" -- test -r "$permission_probe" ||
+            fail "Nginx user $nginx_user cannot read the worktree. Fix directory permissions for $worktree_root."
+    else
+        sudo -u "$nginx_user" test -r "$permission_probe" ||
+            fail "Nginx user $nginx_user cannot read the worktree. Fix directory permissions for $worktree_root."
     fi
-    fail 'The staged public link could not be changed.'
+
+    run_as_root rm -f "$temporary_link" "$old_link"
+    run_as_root ln -s "$public_path" "$temporary_link"
+    if run_as_root test -e "$staged_public_path" || run_as_root test -L "$staged_public_path"; then
+        run_as_root test -L "$staged_public_path" || fail "The staging path exists but is not a symbolic link: $staged_public_path"
+        run_as_root mv "$staged_public_path" "$old_link"
+    fi
+    if ! run_as_root mv "$temporary_link" "$staged_public_path"; then
+        if run_as_root test -L "$old_link"; then
+            run_as_root mv "$old_link" "$staged_public_path"
+        fi
+        fail 'The staged public link could not be changed.'
+    fi
+    run_as_root rm -f "$old_link"
 fi
-run_as_root rm -f "$old_link"
 
 configuration_changed=true
 if run_as_root test -f "$configuration" && run_as_root cmp -s "$temporary_configuration" "$configuration"; then
@@ -215,10 +338,8 @@ if $configuration_changed; then
         backup="$configuration.bak"
         run_as_root cp "$configuration" "$backup"
     fi
-
     run_as_root install -m 0644 "$temporary_configuration" "$configuration"
     run_as_root ln -sfn "$configuration" "$enabled_configuration"
-
     if ! run_as_root nginx -t; then
         if [[ -n $backup ]]; then
             run_as_root mv "$backup" "$configuration"
@@ -227,10 +348,38 @@ if $configuration_changed; then
         fi
         fail 'The generated Nginx configuration did not pass nginx -t.'
     fi
-
     if ! $no_reload; then
         run_as_root systemctl reload nginx
     fi
+fi
+
+remove_mdns_host
+temporary_service=$(mktemp)
+cat > "$temporary_service" <<EOF
+[Unit]
+Description=Publish $mdns_host for Elliptic Preview
+After=avahi-daemon.service
+Requires=avahi-daemon.service
+
+[Service]
+ExecStart=/usr/bin/avahi-publish-address --no-reverse $mdns_host $lan_ip
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+service_changed=true
+if run_as_root test -f "$mdns_service" && run_as_root cmp -s "$temporary_service" "$mdns_service"; then
+    service_changed=false
+fi
+if $service_changed; then
+    run_as_root install -m 0644 "$temporary_service" "$mdns_service"
+    run_as_root systemctl daemon-reload
+fi
+rm -f "$temporary_service"
+run_as_root systemctl enable --now "elliptic-preview-mdns-$site.service" >/dev/null 2>&1
+if $service_changed; then
+    run_as_root systemctl restart "elliptic-preview-mdns-$site.service"
 fi
 
 if [[ -n ${php_socket:-} ]] && ! $no_reload; then
@@ -238,9 +387,12 @@ if [[ -n ${php_socket:-} ]] && ! $no_reload; then
     run_as_root systemctl reload "$php_service"
 fi
 
-if $backend_only; then
-    printf '%s\n' "$backend"
+if $quiet; then
+    :
+elif $backend_only; then
+    printf 'http://%s\n' "$mdns_host"
 else
-    printf 'Staged %s.test successfully.\n' "$site"
-    printf 'Backend: %s\n' "$backend"
+    printf 'Staged %s successfully.\n' "$site"
+    printf 'Local URL: http://%s\n' "$mdns_host"
+    printf 'Backend: %s\n' "${backend:-$staged_public_path}"
 fi

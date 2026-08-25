@@ -5,7 +5,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from preview_tool.cli import is_service_host, service_identity, start_preview, update_preview
+from preview_tool.cli import (
+    is_service_host,
+    service_identity,
+    start_linux_preview,
+    start_preview,
+    update_preview,
+)
 from preview_tool.core import (
     PreviewError,
     Project,
@@ -14,7 +20,7 @@ from preview_tool.core import (
     safe_site_name,
     service_slug,
 )
-from preview_tool.platforms.linux import nginx_backend, prepare as prepare_linux, stage_path
+from preview_tool.platforms.linux import mdns_host, prepare as prepare_linux, stage_path
 from preview_tool.platforms.windows import apache_preview_config, running_laragon_root
 
 
@@ -70,18 +76,26 @@ class PreviewTests(unittest.TestCase):
 
     def test_linux_stage_backend_replaces_app_url(self) -> None:
         project = Project(Path("/project"), "demo.test", "demo", "http://demo.test")
-        args = argparse.Namespace(backend=None)
+        args = argparse.Namespace(backend=None, no_stage=False)
         completed = subprocess.CompletedProcess([], 0, "", "")
 
         with (
             patch("preview_tool.platforms.linux.stage_path", return_value="/bin/stage"),
+            patch("preview_tool.platforms.linux.machine_label", return_value="build-server"),
             patch("preview_tool.platforms.linux.run", return_value=completed) as run_command,
         ):
             prepared = prepare_linux(project, "demo.tailnet.ts.net", args)
 
-        self.assertEqual(prepared.backend_url, nginx_backend("demo"))
+        self.assertEqual(prepared.backend_url, "http://demo-build-server.local")
         run_command.assert_called_once_with(
-            ["/bin/stage", "--site", "demo"],
+            [
+                "/bin/stage",
+                "--site",
+                "demo",
+                "--machine",
+                "build-server",
+                "--quiet",
+            ],
             check=False,
             capture=False,
             cwd=Path("/project"),
@@ -104,29 +118,76 @@ class PreviewTests(unittest.TestCase):
 
     def test_linux_stage_keeps_explicit_backend(self) -> None:
         project = Project(Path("/project"), "demo.test", "demo", "http://127.0.0.1:8000")
-        args = argparse.Namespace(backend="http://127.0.0.1:8000")
+        args = argparse.Namespace(backend="http://127.0.0.1:8000", no_stage=False)
         completed = subprocess.CompletedProcess([], 0, "", "")
 
         with (
             patch("preview_tool.platforms.linux.stage_path", return_value="/bin/stage"),
-            patch("preview_tool.platforms.linux.run", return_value=completed),
+            patch("preview_tool.platforms.linux.machine_label", return_value="build-server"),
+            patch("preview_tool.platforms.linux.run", return_value=completed) as run_command,
         ):
             prepared = prepare_linux(project, "demo.tailnet.ts.net", args)
 
-        self.assertEqual(prepared, project)
+        self.assertEqual(prepared.backend_url, "http://demo-build-server.local")
+        run_command.assert_called_once_with(
+            [
+                "/bin/stage",
+                "--site",
+                "demo",
+                "--machine",
+                "build-server",
+                "--quiet",
+                "--backend",
+                "http://127.0.0.1:8000",
+            ],
+            check=False,
+            capture=False,
+            cwd=Path("/project"),
+        )
+
+    def test_linux_no_stage_is_rejected(self) -> None:
+        project = Project(Path("/project"), "demo.test", "demo", "http://demo.test")
+        args = argparse.Namespace(backend=None, no_stage=True)
+        with self.assertRaises(PreviewError):
+            prepare_linux(project, "", args)
+
+    def test_linux_start_prints_all_active_addresses(self) -> None:
+        project = Project(
+            Path("/project"),
+            "demo-build-server.local",
+            "demo",
+            "http://demo-build-server.local",
+        )
+        args = argparse.Namespace(
+            site=None,
+            backend=None,
+            no_stage=False,
+            laragon_root=None,
+        )
+        with (
+            patch("preview_tool.cli.detect_project", return_value=project),
+            patch("preview_tool.cli.prepare", return_value=project),
+            patch("preview_tool.platforms.linux.status") as show_status,
+        ):
+            start_linux_preview(args)
+
+        show_status.assert_called_once_with()
 
     def test_linux_stage_decline_uses_app_url(self) -> None:
         project = Project(Path("/project"), "demo.test", "demo", "http://demo.test")
-        args = argparse.Namespace(backend=None)
+        args = argparse.Namespace(backend=None, no_stage=False)
         completed = subprocess.CompletedProcess([], 20, "", "")
 
         with (
             patch("preview_tool.platforms.linux.stage_path", return_value="/bin/stage"),
             patch("preview_tool.platforms.linux.run", return_value=completed),
         ):
-            prepared = prepare_linux(project, "demo.tailnet.ts.net", args)
+            with self.assertRaises(PreviewError):
+                prepare_linux(project, "demo.tailnet.ts.net", args)
 
-        self.assertEqual(prepared, project)
+    def test_linux_mdns_name_includes_machine(self) -> None:
+        project = Project(Path("/project"), "DG.EMForward.test", "dg.emforward", "")
+        self.assertEqual(mdns_host(project, "Build_Server.example"), "dg-emforward-build-server.local")
 
     def test_update_reinstalls_linux_command_links(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -189,6 +250,7 @@ class PreviewTests(unittest.TestCase):
         completed = subprocess.CompletedProcess([], 0, "", "")
 
         with (
+            patch("preview_tool.cli.platform.system", return_value="Windows"),
             patch("preview_tool.cli.detect_project", return_value=project),
             patch("preview_tool.cli.ensure_tailscale_online", return_value=status),
             patch("preview_tool.cli.prepare", return_value=project),

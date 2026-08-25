@@ -83,7 +83,7 @@ def service_slug(value: str) -> str:
     value = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")
     value = re.sub(r"-+", "-", value)[:63].rstrip("-")
     if not value:
-        raise PreviewError("The project did not produce a valid Tailscale service name.")
+        raise PreviewError("The project did not produce a valid DNS label.")
     return value
 
 

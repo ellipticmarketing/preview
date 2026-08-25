@@ -34,6 +34,10 @@ missing_packages=()
 command -v curl >/dev/null 2>&1 || missing_packages+=(curl)
 command -v git >/dev/null 2>&1 || missing_packages+=(git)
 command -v python3 >/dev/null 2>&1 || missing_packages+=(python3)
+command -v nginx >/dev/null 2>&1 || missing_packages+=(nginx)
+command -v avahi-daemon >/dev/null 2>&1 || missing_packages+=(avahi-daemon)
+command -v avahi-resolve >/dev/null 2>&1 || missing_packages+=(avahi-utils)
+dpkg-query -W -f='${Status}' libnss-mdns 2>/dev/null | grep -Fq 'install ok installed' || missing_packages+=(libnss-mdns)
 
 if ((${#missing_packages[@]} > 0)); then
     printf 'Installing required system packages: %s\n' "${missing_packages[*]}"
@@ -43,15 +47,6 @@ fi
 
 if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))'; then
     fail 'Python 3.10 or newer is required.'
-fi
-
-if ! command -v tailscale >/dev/null 2>&1; then
-    printf 'Installing Tailscale with the official Tailscale installer...\n'
-    curl -fsSL https://tailscale.com/install.sh | sh
-fi
-
-if ! command -v tailscale >/dev/null 2>&1; then
-    fail 'Tailscale installation did not add the tailscale command.'
 fi
 
 if [[ -e "$install_directory" ]]; then
@@ -101,12 +96,5 @@ fi
 
 printf '\nInstallation complete.\n'
 "$command_directory/preview" version
-
-if tailscale status >/dev/null 2>&1; then
-    printf 'Tailscale is connected. Preview is ready to use.\n'
-else
-    printf '\nOne setup step remains. Connect this machine to Tailscale:\n'
-    printf '  sudo tailscale up\n'
-fi
 
 printf '\nOpen a new shell before you use preview.\n'

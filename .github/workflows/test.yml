@@ -25,14 +25,14 @@ jobs:
       - if: runner.os == 'Linux' && matrix.python-version == '3.13'
         run: |
           sudo apt-get update
-          sudo apt-get install -y nginx
+          sudo apt-get install -y nginx avahi-daemon avahi-utils libnss-mdns
           test_root="/tmp/elliptic-stage-test-$GITHUB_RUN_ID"
           mkdir -p "$test_root/public"
           git -C "$test_root" init
           printf 'stage works\n' > "$test_root/public/index.html"
           (cd "$test_root" && "$GITHUB_WORKSPACE/bin/stage" --site ci-preview)
-          port=$(python3 -c 'import zlib; print(20000 + zlib.crc32(b"ci-preview") % 20000)')
-          curl -fsS "http://127.0.0.1:$port" | grep -Fx 'stage works'
+          preview_host="ci-preview-$(hostname -s | tr '[:upper:]_' '[:lower:]-').local"
+          curl -fsS --resolve "$preview_host:80:127.0.0.1" "http://$preview_host" | grep -Fx 'stage works'
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |
