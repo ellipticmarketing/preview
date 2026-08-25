@@ -83,7 +83,18 @@ run_as_root systemctl enable --now nginx
 if [[ -z $site ]]; then
     for environment_file in "$worktree_root/.env" "$worktree_root/.env.example"; do
         [[ -f $environment_file ]] || continue
-        app_url=$(sed -nE 's/^[[:space:]]*APP_URL[[:space:]]*=[[:space:]]*["'"']?([^"'"'[:space:]]+).*/\1/p' "$environment_file" | head -n 1)
+        app_url=$(python3 - "$environment_file" <<'PY'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8-sig", errors="replace") as environment:
+    for line in environment:
+        match = re.match(r"^\s*APP_URL\s*=\s*(.*?)\s*$", line)
+        if match:
+            print(match.group(1).strip().strip("\"'"))
+            break
+PY
+)
         if [[ -n $app_url ]]; then
             app_host=$(python3 -c 'import sys; from urllib.parse import urlparse; print(urlparse(sys.argv[1]).hostname or "")' "$app_url")
             if [[ $app_host == *.test ]]; then
