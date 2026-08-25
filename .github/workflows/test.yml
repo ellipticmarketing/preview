@@ -26,7 +26,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y nginx
-          test_root="$RUNNER_TEMP/elliptic-stage-test"
+          test_root="/tmp/elliptic-stage-test-$GITHUB_RUN_ID"
           mkdir -p "$test_root/public"
           git -C "$test_root" init
           printf 'stage works\n' > "$test_root/public/index.html"
